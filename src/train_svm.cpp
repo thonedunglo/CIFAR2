@@ -2,7 +2,10 @@
 #include <chrono>
 #include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <ctime>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -38,6 +41,27 @@ struct DatasetMem {
     std::size_t n = 0;
     std::size_t dim = 0;
 };
+
+struct EvalResult {
+    double acc = 0.0;
+    std::size_t correct = 0;
+    std::size_t total = 0;
+    std::vector<int> conf;  // size 100
+};
+
+std::string now_string() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
 
 DatasetMem load_split(const std::string& feat_path, const std::string& lbl_path,
                       std::size_t dim, std::size_t limit = 0) {
@@ -151,22 +175,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "Training RBF SVM with C=" << param.C
-            << ", gamma=" << param.gamma
-            << ", cache=" << param.cache_size << "MB, eps=" << param.eps << "\n";
-
-    auto quiet = [](const char*) {};
-    svm_set_print_string_function(quiet);
-
+    std::cout << "Training RBF SVM with C=" << param.C << ", gamma=" << param.gamma
+              << ", cache=" << param.cache_size << "MB, eps=" << param.eps << "\n";
     auto t_train0 = std::chrono::high_resolution_clock::now();
     svm_model* model = svm_train(&prob, &param);
     auto t_train1 = std::chrono::high_resolution_clock::now();
-
     std::chrono::duration<double> dt_train = t_train1 - t_train0;
 
-    auto evaluate = [&](const DatasetMem& ds, const std::string& name) {
-        std::vector<int> conf(num_classes * num_classes, 0);
-        std::size_t correct = 0;
+    auto evaluate = [&](const DatasetMem& ds, const std::string& name) -> EvalResult {
+        EvalResult res;
+        res.conf.resize(num_classes * num_classes, 0);
+        res.total = ds.n;
         std::vector<svm_node> nodes(ds.n * (args.dim + 1));
         for (std::size_t i = 0; i < ds.n; ++i) {
             svm_node* row = &nodes[i * (args.dim + 1)];
@@ -179,29 +198,65 @@ int main(int argc, char** argv) {
 
             int pred = static_cast<int>(svm_predict(model, row));
             int y = ds.y[i];
-            if (pred == y) correct++;
-            conf[y * num_classes + pred] += 1;
+            if (pred == y) res.correct++;
+            res.conf[y * num_classes + pred] += 1;
         }
-        double acc = static_cast<double>(correct) / static_cast<double>(ds.n);
-        std::cout << name << " accuracy: " << acc * 100.0 << "% (" << correct
-                  << "/" << ds.n << ")\n";
+        res.acc = static_cast<double>(res.correct) / static_cast<double>(res.total);
+
+        std::cout << name << " accuracy: " << res.acc * 100.0 << "% (" << res.correct
+                  << "/" << res.total << ")\n";
         std::cout << "Confusion matrix (rows=true, cols=pred):\n";
         for (int r = 0; r < num_classes; ++r) {
             for (int c = 0; c < num_classes; ++c) {
-                std::cout << conf[r * num_classes + c] << (c + 1 == num_classes ? "" : " ");
+                std::cout << res.conf[r * num_classes + c]
+                          << (c + 1 == num_classes ? "" : " ");
             }
             std::cout << "\n";
         }
+        return res;
     };
 
     auto t_eval0 = std::chrono::high_resolution_clock::now();
-    evaluate(train, "Train");
-    evaluate(test, "Test");
+    EvalResult train_res = evaluate(train, "Train");
+    EvalResult test_res = evaluate(test, "Test");
     auto t_eval1 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> dt_eval = t_eval1 - t_eval0;
 
     std::cout << "Timing: load=" << dt_load.count() << "s, train=" << dt_train.count()
               << "s, eval=" << dt_eval.count() << "s\n";
+
+    // Append log
+    std::ofstream logf("svm_log.txt", std::ios::app);
+    if (logf) {
+        logf << "================\n";
+        logf << "Datetime: " << now_string() << "\n";
+        logf << "Method: CPU\n";
+        logf << "Train accuracy: " << train_res.acc * 100.0 << "% (" << train_res.correct
+             << "/" << train_res.total << ")\n";
+        logf << "Test  accuracy: " << test_res.acc * 100.0 << "% (" << test_res.correct
+             << "/" << test_res.total << ")\n";
+        logf << "Train confusion matrix (rows=true, cols=pred):\n";
+        for (int r = 0; r < num_classes; ++r) {
+            for (int c = 0; c < num_classes; ++c) {
+                logf << train_res.conf[r * num_classes + c]
+                     << (c + 1 == num_classes ? "" : " ");
+            }
+            logf << "\n";
+        }
+        logf << "Test confusion matrix (rows=true, cols=pred):\n";
+        for (int r = 0; r < num_classes; ++r) {
+            for (int c = 0; c < num_classes; ++c) {
+                logf << test_res.conf[r * num_classes + c]
+                     << (c + 1 == num_classes ? "" : " ");
+            }
+            logf << "\n";
+        }
+        logf << "Timing: load=" << dt_load.count() << "s, train=" << dt_train.count()
+             << "s, eval=" << dt_eval.count() << "s\n";
+        logf << "================\n";
+    } else {
+        std::cerr << "Warning: cannot open svm_log.txt for append\n";
+    }
 
     svm_free_and_destroy_model(&model);
     return 0;

@@ -10,6 +10,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <ctime>
+#include <iomanip>
 #include <vector>
 
 #define CUDA_CHECK(expr)                                                      \
@@ -79,7 +81,8 @@ void encode_batch_gpu(GPUAutoencoder& gpu, std::size_t batch, std::vector<float>
 void process_split_gpu(const std::vector<float>& images, const std::vector<int>& labels,
                        GPUAutoencoder& gpu, std::size_t total, std::size_t batch_size,
                        const std::string& feature_path, const std::string& label_path,
-                       std::size_t log_interval) {
+                       std::size_t log_interval, double& time_sum_out,
+                       std::size_t& batches_out) {
     std::ofstream feat_out(feature_path, std::ios::binary | std::ios::trunc);
     std::ofstream lbl_out(label_path, std::ios::binary | std::ios::trunc);
     if (!feat_out || !lbl_out) {
@@ -125,6 +128,8 @@ void process_split_gpu(const std::vector<float>& images, const std::vector<int>&
     }
     double avg = time_sum / static_cast<double>(num_batches);
     std::cout << "  Avg time per batch: " << avg << " s\n";
+    time_sum_out += time_sum;
+    batches_out += num_batches;
 }
 
 int main(int argc, char** argv) {
@@ -146,21 +151,53 @@ int main(int argc, char** argv) {
         (args.test_sample > 0) ? std::min(args.test_sample, ds.test_size()) : ds.test_size();
 
     auto start = std::chrono::high_resolution_clock::now();
+    double time_sum = 0.0;
+    std::size_t total_batches = 0;
     std::cout << "Extracting train features (GPU)...\n";
     process_split_gpu(ds.train_images(), ds.train_labels(), gpu, train_limit,
                       args.batch_size, args.out_prefix + "_train_features.bin",
-                      args.out_prefix + "_train_labels.bin", args.log_interval);
+                      args.out_prefix + "_train_labels.bin", args.log_interval,
+                      time_sum, total_batches);
 
     std::cout << "Extracting test features (GPU)...\n";
     process_split_gpu(ds.test_images(), ds.test_labels(), gpu, test_limit,
                       args.batch_size, args.out_prefix + "_test_features.bin",
-                      args.out_prefix + "_test_labels.bin", args.log_interval);
+                      args.out_prefix + "_test_labels.bin", args.log_interval,
+                      time_sum, total_batches);
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
+    double avg_time = (total_batches > 0) ? (time_sum / static_cast<double>(total_batches)) : 0.0;
     std::cout << "Done. Total time: " << elapsed.count() << " s\n";
     std::cout << "Outputs:\n  " << args.out_prefix << "_train_features.bin\n  "
               << args.out_prefix << "_train_labels.bin\n  " << args.out_prefix
               << "_test_features.bin\n  " << args.out_prefix << "_test_labels.bin\n";
+
+    // Append log
+    std::ofstream logf("extract_log.txt", std::ios::app);
+    if (logf) {
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm{};
+#if defined(_WIN32)
+        localtime_s(&tm, &t);
+#else
+        localtime_r(&t, &tm);
+#endif
+        logf << "================\n";
+        logf << "Datetime: " << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << "\n";
+        logf << "Device: GPU\n";
+        logf << "Train sample: " << train_limit << "\n";
+        logf << "Test sample: " << test_limit << "\n";
+        logf << "Batch size: " << args.batch_size << "\n";
+        logf << "Total time: " << elapsed.count() << " s\n";
+        logf << "Avg time per batch: " << avg_time << " s\n";
+        logf << "Outputs:\n";
+        logf << "  " << args.out_prefix << "_train_features.bin\n";
+        logf << "  " << args.out_prefix << "_train_labels.bin\n";
+        logf << "  " << args.out_prefix << "_test_features.bin\n";
+        logf << "  " << args.out_prefix << "_test_labels.bin\n";
+        logf << "================\n";
+    }
     return 0;
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Train/Eval SVM on GPU using cuML SVC (RBF).
+Train/Eval SVM on GPU using ThunderSVM SVC (RBF).
 Usage:
   python train_svm_gpu.py features 8192 0 0 10 0.000122 1e-3
 Args:
@@ -14,8 +14,8 @@ Args:
 """
 
 import argparse
-import struct
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -94,6 +94,27 @@ def main():
         print(" ".join(str(x) for x in r))
 
     print(f"Timing: load={t1 - t0:.4f}s, train={t_train1 - t_train0:.4f}s, eval={t_eval - t_train1:.4f}s")
+
+    # Append log
+    try:
+        with open("svm_log.txt", "a", encoding="utf-8") as f:
+            f.write("================\n")
+            f.write(f"Datetime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("Method: GPU\n")
+            f.write(f"Train accuracy: {train_acc * 100:.2f}% ({(y_train_pred == y_train).sum()}/{y_train.size})\n")
+            f.write(f"Test  accuracy: {test_acc * 100:.2f}% ({(y_test_pred == y_test).sum()}/{y_test.size})\n")
+            f.write("Train confusion matrix (rows=true, cols=pred):\n")
+            for r in cm_train:
+                f.write(" ".join(str(x) for x in r) + "\n")
+            f.write("Test confusion matrix (rows=true, cols=pred):\n")
+            for r in cm_test:
+                f.write(" ".join(str(x) for x in r) + "\n")
+            f.write(
+                f"Timing: load={t1 - t0:.4f}s, train={t_train1 - t_train0:.4f}s, eval={t_eval - t_train1:.4f}s\n"
+            )
+            f.write("================\n")
+    except Exception as e:
+        print(f"Warning: cannot write svm_log.txt ({e})")
 
 
 if __name__ == "__main__":
