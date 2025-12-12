@@ -1,0 +1,89 @@
+## Phase 1: CPU Baseline & Data Pipeline
+- [ ] Data loading & preprocessing:
+  - [ ] Tạo lớp `CIFAR10Dataset` để đọc các batch CIFAR-10 (5 train + 1 test).
+  - [ ] Parse nhị phân: 1 byte nhãn + 3.072 byte ảnh/record.
+  - [ ] Chuẩn hóa pixel uint8 [0,255] → float [0,1].
+  - [ ] Sinh batch cho training, có shuffle.
+  - [ ] Lưu trữ ảnh/nhãn train (50k), test (10k) trong bộ nhớ.
+- [ ] CPU layers:
+  - [ ] Convolution 3×3 với padding/stride.
+  - [ ] ReLU.
+  - [ ] MaxPooling 2×2 (downsample ×0.5).
+  - [ ] Upsampling (nearest neighbor ×2).
+  - [ ] MSE loss.
+- [ ] Autoencoder:
+  - [ ] Lớp bao gói mạng, cấp phát weight/bias 5 conv.
+  - [ ] Khởi tạo weight.
+  - [ ] Cấp phát bộ nhớ cho activations trung gian.
+  - [ ] Forward encoder→decoder tuần tự.
+  - [ ] Backward đầy đủ.
+  - [ ] Hàm trích đặc trưng (encoder only) trả về latent.
+  - [ ] Lưu/tải trọng số (persistence).
+- [ ] Training loop (CPU):
+  - [ ] Thiết lập hyperparams: batch size 32, 20 epochs, lr 0.001.
+  - [ ] Vòng lặp epoch/batch: forward → loss → backward → update.
+  - [ ] Log loss, thời gian/epoch.
+  - [ ] Lưu trọng số sau train.
+- [ ] Deliverables phase 1:
+  - [ ] Pipeline dữ liệu hoạt động.
+  - [ ] Đủ layer CPU.
+  - [ ] Baseline performance measurements.
+
+## Phase 2: Naive GPU Implementation
+- [ ] GPU memory management:
+  - [ ] Lớp `GPUAutoencoder`.
+  - [ ] Cấp phát device cho weight/activation/gradient.
+  - [ ] Hàm copy weight host↔device.
+  - [ ] Giải phóng cudaFree đúng.
+- [ ] Kernel naive:
+  - [ ] Convolution: mỗi thread tính 1 output pixel, dùng global memory, padding boundary.
+  - [ ] ReLU: mỗi thread 1 phần tử (in-place).
+  - [ ] MaxPooling: mỗi thread 1 output, tìm max 2×2.
+  - [ ] Upsampling: mỗi thread 1 output, map ngược chia 2 (nearest).
+  - [ ] MSE loss: reduction shared memory, atomicAdd tích lũy.
+- [ ] GPU forward pass:
+  - [ ] Copy batch H2D.
+  - [ ] Launch kernel tuần tự từng layer, sync.
+  - [ ] Copy output D2H, tính loss.
+- [ ] GPU backward pass:
+  - [ ] Grad cho từng layer (conv/relu/maxpool/upsample).
+  - [ ] Tính grad weights.
+  - [ ] Cập nhật SGD: weight -= lr * grad.
+- [ ] GPU training loop:
+  - [ ] Batch size 64 cho GPU.
+  - [ ] Quy trình copy → forward → loss → backward → update.
+  - [ ] Dùng GPU timer, hiển thị tiến độ/loss.
+  - [ ] Lưu trọng số (checkpoint GPU).
+- [ ] Deliverables phase 2:
+  - [ ] Port đủ layer sang GPU.
+  - [ ] Forward/backward hoạt động.
+  - [ ] Vòng lặp train GPU hoạt động, có kiểm chứng đúng.
+
+## Phase 3: Advanced Optimization
+- [ ] Mục tiêu: tối ưu truy cập bộ nhớ và kernel để đạt hiệu năng cao.
+- [ ] Gợi ý tối ưu Memory:
+  - [ ] Shared memory tiling cho convolution.
+  - [ ] Chuyển conv thành GEMM/matmul.
+  - [ ] Tối ưu coalescing.
+  - [ ] Dùng constant memory cho weight nhỏ/bias.
+  - [ ] Pinned (cudaMallocHost) cho buffer CPU.
+  - [ ] Unified Memory (nếu chọn).
+  - [ ] Memory pool/reuse buffer, tránh cudaMalloc/cudaFree lặp lại.
+- [ ] Gợi ý tối ưu Kernel:
+  - [ ] Kernel fusion (Conv + ReLU + Bias).
+  - [ ] Block-level fusion (encoder/decoder).
+  - [ ] Loop unrolling.
+  - [ ] Vectorized access (float4).
+  - [ ] Tuning block size (ví dụ 16×16, 32×8).
+  - [ ] Mixed precision (FP16/FP32).
+- [ ] Gợi ý Parallelism & Concurrency:
+  - [ ] Gradient checkpointing.
+  - [ ] Multi-stream pipeline (overlap H2D/compute/D2H).
+  - [ ] Batching nhiều ảnh song song.
+
+## Phase 4: SVM Integration & Analysis
+- [ ] Mục tiêu: hoàn thiện pipeline và đánh giá hiệu năng.
+- [ ] Trích đặc trưng: chạy encoder đã train để xuất (50000,8192) train_features và (10000,8192) test_features.
+- [ ] Train SVM (library, ưu tiên LIBSVM) với nhãn train, kernel RBF, chọn C/gamma.
+- [ ] Đánh giá: dự đoán test_features, tính accuracy, confusion matrix, so sánh với mục tiêu 60–65%.
+- [ ] Báo cáo thời gian: feature extraction, SVM train, speedup vs CPU.

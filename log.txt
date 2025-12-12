@@ -1,0 +1,17 @@
+==============
+<<<General>>>
+Time: 2025-12-11 23:45:56
+Device: CPU
+Optimization: None
+<<<Input>>>
+Sample: 32
+Test_sample: 32
+Batch_size: 8
+Epochs: 2
+Log_interval: 1
+Lr: 0.001
+Load_checkpoint: 0
+<<<Result>>>
+Last_epoch_loss: 0.163907
+Avg_epoch_time: 18.5662
+==============
