@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cuda.h>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -19,12 +20,19 @@ int main(int argc, char** argv) {
         data_dir = argv[1];
     }
 
+    // Manually set GPU device ID if needed.
+    int gpu_id = 1;  // adjust this value to target another GPU
+    cudaError_t dev_err = cudaSetDevice(gpu_id);
+    if (dev_err != cudaSuccess) {
+        std::cerr << "Failed to set CUDA device " << gpu_id << ": "
+                  << cudaGetErrorString(dev_err) << "\n";
+        return 1;
+    }
+
     CIFAR10Dataset ds(data_dir);
     ds.load();
 
     TrainConfig cfg;
-    // GPU default: batch_size 64
-    cfg.batch_size = 64;
     AutoencoderCPU cpu_model;
     GPUAutoencoder gpu(cfg.batch_size);
     gpu.load_weights(cpu_model);
@@ -36,8 +44,9 @@ int main(int argc, char** argv) {
     const std::size_t num_batches =
         (train_limit + cfg.batch_size - 1) / cfg.batch_size;
 
-    std::vector<float> h_output(cfg.batch_size * 3 * 32 * 32);
-    std::vector<float> h_grad(cfg.batch_size * 3 * 32 * 32);
+    // Host buffers sized to max batch; resize per actual batch.
+    const std::size_t elems_per_img = 3 * 32 * 32;
+    std::vector<float> h_output(cfg.batch_size * elems_per_img);
 
     // For now, compute loss/grad on host (simple baseline).
     for (std::size_t epoch = 0; epoch < cfg.epochs; ++epoch) {
@@ -73,6 +82,7 @@ int main(int argc, char** argv) {
             forward_naive(gpu, batch_sz);
 
             const std::size_t elems = batch_sz * 3 * 32 * 32;
+            h_output.resize(elems);
             cudaMemcpy(h_output.data(), gpu.act9(), elems * sizeof(float),
                        cudaMemcpyDeviceToHost);
 
