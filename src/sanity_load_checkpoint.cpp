@@ -4,8 +4,8 @@
 #include <cmath>
 #include <iostream>
 #include <string>
-#include <vector>
 #include <tuple>
+#include <vector>
 
 int main(int argc, char** argv) {
     std::string path = "ae_checkpoint.bin";

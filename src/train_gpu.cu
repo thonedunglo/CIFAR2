@@ -62,12 +62,9 @@ int main(int argc, char** argv) {
     const std::size_t num_batches =
         (train_limit + cfg.batch_size - 1) / cfg.batch_size;
 
-    // Host pinned buffers sized to max batch; reuse per iteration.
     const std::size_t elems_per_img = 3 * 32 * 32;
-    float* h_input = nullptr;
-    float* h_output = nullptr;
-    CUDA_CHECK(cudaMallocHost(&h_input, cfg.batch_size * elems_per_img * sizeof(float)));
-    CUDA_CHECK(cudaMallocHost(&h_output, cfg.batch_size * elems_per_img * sizeof(float)));
+    std::vector<float> h_input(cfg.batch_size * elems_per_img);
+    std::vector<float> h_output(cfg.batch_size * elems_per_img);
 
     std::vector<double> epoch_times;
     double last_avg_loss = 0.0;
@@ -125,13 +122,13 @@ int main(int argc, char** argv) {
                       batch.labels.begin());
 
             cudaEventRecord(ev_start);
-            // Copy into pinned host buffer then H2D.
-            std::memcpy(h_input, batch.images.data(),
+            // Copy host -> device.
+            std::memcpy(h_input.data(), batch.images.data(),
                         batch_sz * elems_per_img * sizeof(float));
             cudaEventRecord(ev_copy_start);
-            CUDA_CHECK(cudaMemcpyAsync(gpu.input_buf(), h_input,
-                                       batch_sz * elems_per_img * sizeof(float),
-                                       cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(gpu.input_buf(), h_input.data(),
+                                  batch_sz * elems_per_img * sizeof(float),
+                                  cudaMemcpyHostToDevice));
             cudaEventRecord(ev_copy_end);
             gpu.zero_grads();
 
@@ -139,20 +136,16 @@ int main(int argc, char** argv) {
             forward_naive(gpu, batch_sz);
             cudaEventRecord(ev_fwd_end);
 
-            const std::size_t elems = batch_sz * 3 * 32 * 32;
-            CUDA_CHECK(cudaMemcpyAsync(h_output, gpu.act9(), elems * sizeof(float),
-                                       cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaDeviceSynchronize());
-
             auto t_loss0 = std::chrono::high_resolution_clock::now();
-            std::vector<float> out_vec(h_output, h_output + elems);
-            float loss = mse.forward(out_vec, batch.images);
-            auto grad_host = mse.backward(out_vec, batch.images);
-            auto t_loss1 = std::chrono::high_resolution_clock::now();
+
+            // Compute Loss on GPU (returns scalar value to host)
+            float loss = gpu.compute_mse_loss(batch_sz);
             loss_sum += loss;
 
-            CUDA_CHECK(cudaMemcpyAsync(gpu.g_act9(), grad_host.data(),
-                                       elems * sizeof(float), cudaMemcpyHostToDevice));
+            // Compute Loss Gradient on GPU (writes directly to device memory)
+            gpu.compute_mse_gradient(batch_sz);
+
+            auto t_loss1 = std::chrono::high_resolution_clock::now();
 
             cudaEventRecord(ev_bwd_start);
             // Backward pipeline: conv5 -> up2 -> relu4 -> conv4 -> up1 -> relu3
@@ -249,8 +242,7 @@ int main(int argc, char** argv) {
         last_loss_ms_avg = sum_loss_ms / static_cast<double>(num_batches);
     }
 
-    cudaFreeHost(h_input);
-    cudaFreeHost(h_output);
+    // host buffers are std::vector; no explicit free needed
     gpu.save_weights(cpu_model);
     cpu_model.save_weights("ae_checkpoint_gpu.bin");
     std::cout << "GPU training finished. Weights saved to ae_checkpoint_gpu.bin\n";

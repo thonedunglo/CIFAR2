@@ -1,10 +1,10 @@
 #include "autoencoder.h"
 
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <stdexcept>
 #include <fstream>
-#include <cstring>
 
 namespace {
 inline float he_std(std::size_t fan_in) {

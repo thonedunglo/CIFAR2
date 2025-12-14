@@ -76,7 +76,11 @@ public:
     float* input_buf() const { return d_input_; }
     uint32_t* pool1_indices() const { return d_pool1_idx_; }
     uint32_t* pool2_indices() const { return d_pool2_idx_; }
+    // Compute loss on GPU, then copy the single scalar result to CPU for logging
+    float compute_mse_loss(std::size_t batch_size);
 
+    // Compute loss gradients (backward) directly on the GPU
+    void compute_mse_gradient(std::size_t batch_size);
 private:
     void alloc_weights_and_grads();
     void alloc_activations(std::size_t batch_size_max);
@@ -107,6 +111,8 @@ private:
     std::size_t act1_size_{}, act2_size_{}, act3_size_{}, act4_size_{},
         act5_size_{}, act6_size_{}, act7_size_{}, act8_size_{}, act9_size_{};
     std::size_t input_size_{};
+    // Device buffer to store the scalar loss value
+    float* d_loss_val_{};
 };
 
 // Naive convolution forward kernel launcher (padding=1, stride=1, channel-first).
@@ -114,6 +120,11 @@ void conv2d_forward_naive(const float* input, const float* weight,
                           const float* bias, float* output, std::size_t batch,
                           std::size_t in_c, std::size_t out_c,
                           std::size_t height, std::size_t width);
+void conv2d_forward_relu(const float* input, const float* weight,
+                         const float* bias, float* output,
+                         std::size_t batch, std::size_t in_c,
+                         std::size_t out_c, std::size_t height,
+                         std::size_t width);
 
 // ReLU forward (elementwise). If output == input, works in-place.
 void relu_forward_naive(const float* input, float* output, std::size_t total);

@@ -20,3 +20,25 @@ Forward: 11.2966 ms
 Backward: 313.933 ms
 Loss_ms: 0.681242 ms
 ==============
+==============
+<<<General>>>
+Time: 2025-12-14 14:06:23
+Device: GPU
+Optimization: Pinned host buffer, Kernel fusion (Conv + ReLU + Bias)
+<<<Input>>>
+Sample: 1024
+Test_sample: 10000
+Batch_size: 64
+Epochs: 1
+Log_interval: 4
+Lr: 0.001
+Load_checkpoint: 0
+<<<Result>>>
+Last_epoch_loss: 0.208359
+Avg_epoch_time: 5.37131
+Memory_usage: 8833.5 MB
+H2D_copy: 0.124736 ms
+Forward: 17.4647 ms
+Backward: 315.664 ms
+Loss_ms: 0.906906 ms
+==============

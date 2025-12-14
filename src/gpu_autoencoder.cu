@@ -102,6 +102,7 @@ void GPUAutoencoder::alloc_activations(std::size_t /*batch_size_max*/) {
     CUDA_CHECK(cudaMalloc(&d_input_, input_size_ * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_pool1_idx_, act2_size_ * sizeof(uint32_t)));  // pool1 output size
     CUDA_CHECK(cudaMalloc(&d_pool2_idx_, act4_size_ * sizeof(uint32_t)));  // pool2 output size
+    CUDA_CHECK(cudaMalloc(&d_loss_val_, sizeof(float))); // Allocate memory for scalar loss
 }
 
 void GPUAutoencoder::free_all() {
@@ -152,6 +153,7 @@ void GPUAutoencoder::free_all() {
     freep(d_input_);
     if (d_pool1_idx_) cudaFree(d_pool1_idx_), d_pool1_idx_ = nullptr;
     if (d_pool2_idx_) cudaFree(d_pool2_idx_), d_pool2_idx_ = nullptr;
+    if (d_loss_val_) cudaFree(d_loss_val_), d_loss_val_ = nullptr;    // Free scalar loss memory
 }
 
 void GPUAutoencoder::load_weights(const AutoencoderCPU& cpu) {
@@ -266,20 +268,18 @@ void GPUAutoencoder::step(float lr) {
     launch_update(d_b5_, d_gb5_, b5_size_);
 }
 
-// ===================== Naive Conv2D forward =====================
+template <bool FuseReLU>
 __global__ void conv2d_forward_kernel(const float* input, const float* weight,
                                       const float* bias, float* output,
                                       std::size_t batch, std::size_t in_c,
                                       std::size_t out_c, std::size_t height,
                                       std::size_t width) {
-    const std::size_t w_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const std::size_t h_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    const std::size_t x = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::size_t y = blockIdx.y * blockDim.y + threadIdx.y;
     const std::size_t oc = blockIdx.z % out_c;
     const std::size_t n = blockIdx.z / out_c;
+    if (n >= batch || y >= height || x >= width) return;
 
-    if (n >= batch || h_idx >= height || w_idx >= width) return;
-
-    // Flattened index helper
     auto idx4 = [&](std::size_t n, std::size_t c, std::size_t h, std::size_t w,
                     std::size_t C, std::size_t H, std::size_t W) {
         return ((n * C + c) * H + h) * W + w;
@@ -291,23 +291,23 @@ __global__ void conv2d_forward_kernel(const float* input, const float* weight,
 
     float acc = bias[oc];
     for (std::size_t ic = 0; ic < in_c; ++ic) {
-        for (std::size_t kh = 0; kh < 3; ++kh) {
-            for (std::size_t kw = 0; kw < 3; ++kw) {
-                int in_h = static_cast<int>(h_idx) + static_cast<int>(kh) - 1;
-                int in_w = static_cast<int>(w_idx) + static_cast<int>(kw) - 1;
-                if (in_h < 0 || in_w < 0 || in_h >= static_cast<int>(height) ||
-                    in_w >= static_cast<int>(width)) {
+        for (int kh = 0; kh < 3; ++kh) {
+            for (int kw = 0; kw < 3; ++kw) {
+                int in_y = static_cast<int>(y) + kh - 1;
+                int in_x = static_cast<int>(x) + kw - 1;
+                if (in_y < 0 || in_x < 0 || in_y >= static_cast<int>(height) ||
+                    in_x >= static_cast<int>(width)) {
                     continue;
                 }
-                std::size_t in_id =
-                    idx4(n, ic, static_cast<std::size_t>(in_h),
-                         static_cast<std::size_t>(in_w), in_c, height, width);
-                std::size_t w_id = widx(oc, ic, kh, kw, in_c);
-                acc += input[in_id] * weight[w_id];
+                float inval = input[idx4(n, ic, static_cast<std::size_t>(in_y),
+                                         static_cast<std::size_t>(in_x), in_c,
+                                         height, width)];
+                acc += inval * weight[widx(oc, ic, kh, kw, in_c)];
             }
         }
     }
-    output[idx4(n, oc, h_idx, w_idx, out_c, height, width)] = acc;
+    if (FuseReLU && acc < 0.0f) acc = 0.0f;
+    output[idx4(n, oc, y, x, out_c, height, width)] = acc;
 }
 
 void conv2d_forward_naive(const float* input, const float* weight,
@@ -317,8 +317,22 @@ void conv2d_forward_naive(const float* input, const float* weight,
     dim3 block(16, 16);
     dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y,
               batch * out_c);
-    conv2d_forward_kernel<<<grid, block>>>(input, weight, bias, output, batch,
-                                           in_c, out_c, height, width);
+    conv2d_forward_kernel<false><<<grid, block>>>(
+        input, weight, bias, output, batch, in_c, out_c, height, width);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ===================== Fused Conv + Bias + ReLU forward =====================
+void conv2d_forward_relu(const float* input, const float* weight,
+                         const float* bias, float* output,
+                         std::size_t batch, std::size_t in_c,
+                         std::size_t out_c, std::size_t height,
+                         std::size_t width) {
+    dim3 block(16, 16);
+    dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y,
+              batch * out_c);
+    conv2d_forward_kernel<true><<<grid, block>>>(
+        input, weight, bias, output, batch, in_c, out_c, height, width);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -510,24 +524,20 @@ void forward_naive(GPUAutoencoder& gpu, std::size_t batch) {
     }
     // Shapes are fixed by architecture.
     // act1: N,256,32,32
-    conv2d_forward_naive(gpu.input_buf(), gpu.w1(), gpu.b1(), gpu.act1(),
-                         batch, 3, 256, 32, 32);
-    relu_forward_naive(gpu.act1(), gpu.act1(), batch * 256 * 32 * 32);
+    conv2d_forward_relu(gpu.input_buf(), gpu.w1(), gpu.b1(), gpu.act1(),
+                        batch, 3, 256, 32, 32);
     maxpool2x2_forward_naive(gpu.act1(), gpu.act2(), gpu.pool1_indices(), batch, 256, 32, 32);
 
-    conv2d_forward_naive(gpu.act2(), gpu.w2(), gpu.b2(), gpu.act3(),
-                         batch, 256, 128, 16, 16);
-    relu_forward_naive(gpu.act3(), gpu.act3(), batch * 128 * 16 * 16);
+    conv2d_forward_relu(gpu.act2(), gpu.w2(), gpu.b2(), gpu.act3(),
+                        batch, 256, 128, 16, 16);
     maxpool2x2_forward_naive(gpu.act3(), gpu.act4(), gpu.pool2_indices(), batch, 128, 16, 16);
 
-    conv2d_forward_naive(gpu.act4(), gpu.w3(), gpu.b3(), gpu.act5(),
-                         batch, 128, 128, 8, 8);
-    relu_forward_naive(gpu.act5(), gpu.act5(), batch * 128 * 8 * 8);
+    conv2d_forward_relu(gpu.act4(), gpu.w3(), gpu.b3(), gpu.act5(),
+                        batch, 128, 128, 8, 8);
     upsample2x2_forward_naive(gpu.act5(), gpu.act6(), batch, 128, 8, 8);
 
-    conv2d_forward_naive(gpu.act6(), gpu.w4(), gpu.b4(), gpu.act7(),
-                         batch, 128, 256, 16, 16);
-    relu_forward_naive(gpu.act7(), gpu.act7(), batch * 256 * 16 * 16);
+    conv2d_forward_relu(gpu.act6(), gpu.w4(), gpu.b4(), gpu.act7(),
+                        batch, 128, 256, 16, 16);
     upsample2x2_forward_naive(gpu.act7(), gpu.act8(), batch, 256, 16, 16);
 
     conv2d_forward_naive(gpu.act8(), gpu.w5(), gpu.b5(), gpu.act9(),
@@ -697,6 +707,28 @@ void conv2d_backward_naive(const float* input, const float* grad_out,
                                             batch, in_c, out_c, height, width);
     CUDA_CHECK(cudaGetLastError());
 }
+
+float GPUAutoencoder::compute_mse_loss(std::size_t batch) {
+    // act9 is the output, input_buf is the target (since this is an Autoencoder)
+    std::size_t total_elems = batch * 3 * 32 * 32;
+
+    // Call the existing naive kernel
+    mse_loss_forward_naive(d_act9_, d_input_, d_loss_val_, total_elems);
+
+    // Copy only the single scalar float back to Host for logging
+    float host_loss = 0.0f;
+    CUDA_CHECK(cudaMemcpy(&host_loss, d_loss_val_, sizeof(float), cudaMemcpyDeviceToHost));
+
+    return host_loss;
+}
+
+void GPUAutoencoder::compute_mse_gradient(std::size_t batch) {
+    std::size_t total_elems = batch * 3 * 32 * 32;
+
+    // Compute gradient and write directly to d_g_act9_ on device
+    mse_loss_backward_naive(d_act9_, d_input_, d_g_act9_, total_elems);
+}
+
 #include "gpu_autoencoder.h"
 #include <stdexcept>
 #include <vector>
