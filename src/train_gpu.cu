@@ -6,13 +6,29 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cuda.h>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <numeric>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#define CUDA_CHECK(expr)                                                      \
+    do {                                                                     \
+        cudaError_t err__ = (expr);                                          \
+        if (err__ != cudaSuccess) {                                          \
+            throw std::runtime_error(std::string("CUDA error: ") +           \
+                                     cudaGetErrorString(err__));             \
+        }                                                                    \
+    } while (0)
 
 int main(int argc, char** argv) {
     std::string data_dir = "cifar-10-batches-bin";
@@ -33,6 +49,8 @@ int main(int argc, char** argv) {
     ds.load();
 
     TrainConfig cfg;
+    // GPU default: batch_size 64
+    cfg.batch_size = 64;
     AutoencoderCPU cpu_model;
     GPUAutoencoder gpu(cfg.batch_size);
     gpu.load_weights(cpu_model);
@@ -44,24 +62,55 @@ int main(int argc, char** argv) {
     const std::size_t num_batches =
         (train_limit + cfg.batch_size - 1) / cfg.batch_size;
 
-    // Host buffers sized to max batch; resize per actual batch.
+    // Host pinned buffers sized to max batch; reuse per iteration.
     const std::size_t elems_per_img = 3 * 32 * 32;
-    std::vector<float> h_output(cfg.batch_size * elems_per_img);
+    float* h_input = nullptr;
+    float* h_output = nullptr;
+    CUDA_CHECK(cudaMallocHost(&h_input, cfg.batch_size * elems_per_img * sizeof(float)));
+    CUDA_CHECK(cudaMallocHost(&h_output, cfg.batch_size * elems_per_img * sizeof(float)));
+
+    std::vector<double> epoch_times;
+    double last_avg_loss = 0.0;
+    double peak_mem_mb = 0.0;
+    double last_copy_ms_avg = 0.0;
+    double last_forward_ms_avg = 0.0;
+    double last_backward_ms_avg = 0.0;
+    double last_loss_ms_avg = 0.0;
 
     // For now, compute loss/grad on host (simple baseline).
     for (std::size_t epoch = 0; epoch < cfg.epochs; ++epoch) {
         double loss_sum = 0.0;
         double gpu_ms_sum = 0.0;
+        double copy_ms_sum = 0.0;
+        double sum_forward_ms = 0.0;
+        double sum_backward_ms = 0.0;
+        double sum_loss_ms = 0.0;
         auto start = std::chrono::high_resolution_clock::now();
 
-        cudaEvent_t ev_start, ev_end;
+        cudaEvent_t ev_start, ev_end, ev_copy_start, ev_copy_end, ev_fwd_start,
+            ev_fwd_end, ev_bwd_start, ev_bwd_end;
         cudaEventCreate(&ev_start);
         cudaEventCreate(&ev_end);
+        cudaEventCreate(&ev_copy_start);
+        cudaEventCreate(&ev_copy_end);
+        cudaEventCreate(&ev_fwd_start);
+        cudaEventCreate(&ev_fwd_end);
+        cudaEventCreate(&ev_bwd_start);
+        cudaEventCreate(&ev_bwd_end);
 
         for (std::size_t b = 0; b < num_batches; ++b) {
             const std::size_t start_idx = b * cfg.batch_size;
             const std::size_t end_idx = std::min(start_idx + cfg.batch_size, train_limit);
             const std::size_t batch_sz = end_idx - start_idx;
+
+            // Track memory usage snapshot before batch.
+            size_t free_mem = 0, total_mem = 0;
+            double current_mem_mb = 0.0;
+            if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
+                current_mem_mb = static_cast<double>(total_mem - free_mem) /
+                                 (1024.0 * 1024.0);
+                peak_mem_mb = std::max(peak_mem_mb, current_mem_mb);
+            }
 
             Batch batch;
             batch.batch_size = batch_sz;
@@ -76,23 +125,36 @@ int main(int argc, char** argv) {
                       batch.labels.begin());
 
             cudaEventRecord(ev_start);
-            gpu.copy_input_to_device(batch.images, batch_sz);
+            // Copy into pinned host buffer then H2D.
+            std::memcpy(h_input, batch.images.data(),
+                        batch_sz * elems_per_img * sizeof(float));
+            cudaEventRecord(ev_copy_start);
+            CUDA_CHECK(cudaMemcpyAsync(gpu.input_buf(), h_input,
+                                       batch_sz * elems_per_img * sizeof(float),
+                                       cudaMemcpyHostToDevice));
+            cudaEventRecord(ev_copy_end);
             gpu.zero_grads();
 
+            cudaEventRecord(ev_fwd_start);
             forward_naive(gpu, batch_sz);
+            cudaEventRecord(ev_fwd_end);
 
             const std::size_t elems = batch_sz * 3 * 32 * 32;
-            h_output.resize(elems);
-            cudaMemcpy(h_output.data(), gpu.act9(), elems * sizeof(float),
-                       cudaMemcpyDeviceToHost);
+            CUDA_CHECK(cudaMemcpyAsync(h_output, gpu.act9(), elems * sizeof(float),
+                                       cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaDeviceSynchronize());
 
-            float loss = mse.forward(h_output, batch.images);
-            auto grad_host = mse.backward(h_output, batch.images);
+            auto t_loss0 = std::chrono::high_resolution_clock::now();
+            std::vector<float> out_vec(h_output, h_output + elems);
+            float loss = mse.forward(out_vec, batch.images);
+            auto grad_host = mse.backward(out_vec, batch.images);
+            auto t_loss1 = std::chrono::high_resolution_clock::now();
             loss_sum += loss;
 
-            cudaMemcpy(gpu.g_act9(), grad_host.data(),
-                       elems * sizeof(float), cudaMemcpyHostToDevice);
+            CUDA_CHECK(cudaMemcpyAsync(gpu.g_act9(), grad_host.data(),
+                                       elems * sizeof(float), cudaMemcpyHostToDevice));
 
+            cudaEventRecord(ev_bwd_start);
             // Backward pipeline: conv5 -> up2 -> relu4 -> conv4 -> up1 -> relu3
             // -> conv3 -> pool2 -> relu2 -> conv2 -> pool1 -> relu1 -> conv1.
             conv2d_backward_naive(gpu.act8(), gpu.g_act9(), gpu.w5(),
@@ -120,22 +182,45 @@ int main(int argc, char** argv) {
                                   batch_sz, 3, 256, 32, 32);
 
             gpu.step(cfg.lr);
+            cudaEventRecord(ev_bwd_end);
 
             cudaEventRecord(ev_end);
             cudaEventSynchronize(ev_end);
             float ms = 0.0f;
             cudaEventElapsedTime(&ms, ev_start, ev_end);
+            float copy_ms = 0.0f;
+            cudaEventElapsedTime(&copy_ms, ev_copy_start, ev_copy_end);
+            float fwd_ms = 0.0f;
+            cudaEventElapsedTime(&fwd_ms, ev_fwd_start, ev_fwd_end);
+            float bwd_ms = 0.0f;
+            cudaEventElapsedTime(&bwd_ms, ev_bwd_start, ev_bwd_end);
             gpu_ms_sum += ms;
+            copy_ms_sum += copy_ms;
+            sum_forward_ms += fwd_ms;
+            sum_backward_ms += bwd_ms;
+            std::chrono::duration<double, std::milli> loss_ms = t_loss1 - t_loss0;
+            sum_loss_ms += loss_ms.count();
 
             if (cfg.log_interval > 0 && (b + 1) % cfg.log_interval == 0) {
                 std::cout << "  Batch " << (b + 1) << "/" << num_batches
                           << " - loss: " << loss
-                          << " - gpu_ms: " << ms << "\n";
+                          << " - gpu_ms: " << ms
+                          << " - copy_ms: " << copy_ms
+                          << " - fwd_ms: " << fwd_ms
+                          << " - bwd_ms: " << bwd_ms
+                          << " - loss_ms: " << loss_ms.count()
+                          << " - mem_used_mb: " << current_mem_mb << "\n";
             }
         }
 
         cudaEventDestroy(ev_start);
         cudaEventDestroy(ev_end);
+        cudaEventDestroy(ev_copy_start);
+        cudaEventDestroy(ev_copy_end);
+        cudaEventDestroy(ev_fwd_start);
+        cudaEventDestroy(ev_fwd_end);
+        cudaEventDestroy(ev_bwd_start);
+        cudaEventDestroy(ev_bwd_end);
 
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> elapsed = end - start;
@@ -144,11 +229,78 @@ int main(int argc, char** argv) {
         std::cout << "GPU Epoch " << (epoch + 1) << "/" << cfg.epochs
                   << " - avg loss: " << avg_loss
                   << " - time: " << elapsed.count() << "s"
-                  << " - avg gpu time per batch: " << avg_gpu_ms << " ms\n";
+                  << " - avg gpu time per batch: " << avg_gpu_ms
+                  << " ms"
+                  << " - avg copy time per batch: "
+                  << (copy_ms_sum / static_cast<double>(num_batches))
+                  << " ms"
+                  << " - avg forward ms: "
+                  << (sum_forward_ms / static_cast<double>(num_batches))
+                  << " - avg backward ms: "
+                  << (sum_backward_ms / static_cast<double>(num_batches))
+                  << " - avg loss ms: "
+                  << (sum_loss_ms / static_cast<double>(num_batches))
+                  << " ms\n";
+        epoch_times.push_back(elapsed.count());
+        last_avg_loss = avg_loss;
+        last_copy_ms_avg = copy_ms_sum / static_cast<double>(num_batches);
+        last_forward_ms_avg = sum_forward_ms / static_cast<double>(num_batches);
+        last_backward_ms_avg = sum_backward_ms / static_cast<double>(num_batches);
+        last_loss_ms_avg = sum_loss_ms / static_cast<double>(num_batches);
     }
 
+    cudaFreeHost(h_input);
+    cudaFreeHost(h_output);
     gpu.save_weights(cpu_model);
     cpu_model.save_weights("ae_checkpoint_gpu.bin");
     std::cout << "GPU training finished. Weights saved to ae_checkpoint_gpu.bin\n";
+
+    // Write log file similar format to CPU.
+    double avg_epoch_time =
+        epoch_times.empty()
+            ? 0.0
+            : std::accumulate(epoch_times.begin(), epoch_times.end(), 0.0) /
+                  static_cast<double>(epoch_times.size());
+
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_now;
+#if defined(_WIN32) || defined(_WIN64)
+    localtime_s(&tm_now, &now_c);
+#else
+    localtime_r(&now_c, &tm_now);
+#endif
+    std::ofstream logf("log.txt", std::ios::out | std::ios::trunc);
+    if (logf) {
+        logf << "==============\n";
+        logf << "<<<General>>>\n";
+        logf << "Time: " << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S") << "\n";
+        logf << "Device: GPU\n";
+        logf << "Optimization: None\n";
+        logf << "<<<Input>>>\n";
+        logf << "Sample: " << train_limit << "\n";
+        logf << "Test_sample: "
+             << ((cfg.test_sample > 0) ? cfg.test_sample : ds.test_size()) << "\n";
+        logf << "Batch_size: " << cfg.batch_size << "\n";
+        logf << "Epochs: " << cfg.epochs << "\n";
+        logf << "Log_interval: " << cfg.log_interval << "\n";
+        logf << "Lr: " << cfg.lr << "\n";
+        logf << "Load_checkpoint: " << (cfg.load_checkpoint ? 1 : 0) << "\n";
+        logf << "<<<Result>>>\n";
+        logf << "Last_epoch_loss: " << last_avg_loss << "\n";
+        logf << "Avg_epoch_time: " << avg_epoch_time << "\n";
+        logf << "Memory_usage: " << peak_mem_mb << " MB\n";
+        logf << "H2D_copy: "
+             << last_copy_ms_avg << " ms\n";
+        logf << "Forward: "
+             << last_forward_ms_avg << " ms\n";
+        logf << "Backward: "
+             << last_backward_ms_avg << " ms\n";
+        logf << "Loss_ms: "
+             << last_loss_ms_avg << " ms\n";
+        logf << "==============\n";
+    } else {
+        std::cerr << "Warning: failed to write log.txt\n";
+    }
     return 0;
 }

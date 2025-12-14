@@ -1,17 +1,22 @@
 ==============
 <<<General>>>
-Time: 2025-12-11 23:45:56
-Device: CPU
+Time: 2025-12-14 11:01:26
+Device: GPU
 Optimization: None
 <<<Input>>>
-Sample: 32
-Test_sample: 32
-Batch_size: 8
-Epochs: 2
-Log_interval: 1
+Sample: 50000
+Test_sample: 10000
+Batch_size: 64
+Epochs: 1
+Log_interval: 50
 Lr: 0.001
 Load_checkpoint: 0
 <<<Result>>>
-Last_epoch_loss: 0.163907
-Avg_epoch_time: 18.5662
+Last_epoch_loss: 0.0446112
+Avg_epoch_time: 256.115
+Memory_usage: 697.5 MB
+H2D_copy: 0.121028 ms
+Forward: 11.2966 ms
+Backward: 313.933 ms
+Loss_ms: 0.681242 ms
 ==============

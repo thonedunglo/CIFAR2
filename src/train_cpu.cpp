@@ -126,6 +126,7 @@ int main(int argc, char** argv) {
         logf << "<<<Result>>>\n";
         logf << "Last_epoch_loss: " << last_avg_loss << "\n";
         logf << "Avg_epoch_time: " << avg_epoch_time << "\n";
+        logf << "Memory_usage: 0 MB\n";
         logf << "==============\n";
     } else {
         std::cerr << "Warning: failed to write log.txt\n";

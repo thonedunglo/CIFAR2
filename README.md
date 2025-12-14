@@ -226,6 +226,16 @@ Build:
 Chạy (bash tại `~/data/CIFAR2`):
 `./train_gpu ./cifar-10-batches-bin`
 
+## Inference (reconstruct one test image, PPM output, GPU)
+
+Build:
+`nvcc -O2 src/infer.cu src/gpu_autoencoder.cu src/autoencoder.cpp src/layers.cpp src/dataset.cpp -o infer`
+
+Chạy:
+`./infer ./cifar-10-batches-bin ae_checkpoint_gpu.bin 0 infer`
+- args: [data_dir] [checkpoint] [index] [out_prefix]
+- output: `<out_prefix>_orig.ppm`, `<out_prefix>_recon.ppm`
+
 ## Checkpoint load sanity
 
 Build:

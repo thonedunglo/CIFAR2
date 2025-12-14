@@ -3,9 +3,9 @@
 #include <cstddef>
 
 struct TrainConfig {
-    std::size_t batch_size = 128;
-    std::size_t epochs = 10;
-    float lr = 0.002f;
+    std::size_t batch_size = 64;
+    std::size_t epochs = 1;
+    float lr = 0.001f;
     // If >0, only use the first `sample` train examples.
     std::size_t sample = 50000;
     // If >0, only use the first `test_sample` test examples (for eval later).
