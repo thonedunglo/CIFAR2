@@ -4,6 +4,10 @@
 
 #include <stdexcept>
 
+
+__constant__ float c_biases_storage[2048];
+
+
 namespace {
 #define CUDA_CHECK(expr)                                                      \
     do {                                                                     \
@@ -59,11 +63,17 @@ void GPUAutoencoder::alloc_weights_and_grads() {
     CUDA_CHECK(cudaMalloc(&d_w4_, w4_size_ * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_w5_, w5_size_ * sizeof(float)));
 
-    CUDA_CHECK(cudaMalloc(&d_b1_, b1_size_ * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_b2_, b2_size_ * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_b3_, b3_size_ * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_b4_, b4_size_ * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_b5_, b5_size_ * sizeof(float)));
+
+    // Thay vì cudaMalloc, ta lấy địa chỉ của mảng hằng số c_biases_storage
+    float* d_const_base = nullptr;
+    CUDA_CHECK(cudaGetSymbolAddress((void**)&d_const_base, c_biases_storage));
+
+    d_b1_ = d_const_base; 
+    d_b2_ = d_b1_ + b1_size_;
+    d_b3_ = d_b2_ + b2_size_;
+    d_b4_ = d_b3_ + b3_size_;
+    d_b5_ = d_b4_ + b4_size_;
+
 
     CUDA_CHECK(cudaMalloc(&d_gw1_, w1_size_ * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_gw2_, w2_size_ * sizeof(float)));
@@ -115,11 +125,11 @@ void GPUAutoencoder::free_all() {
     freep(d_w3_);
     freep(d_w4_);
     freep(d_w5_);
-    freep(d_b1_);
-    freep(d_b2_);
-    freep(d_b3_);
-    freep(d_b4_);
-    freep(d_b5_);
+    
+    // Vì chúng trỏ vào Constant Memory (được giải phóng tự động khi hết chương trình)
+    d_b1_ = d_b2_ = d_b3_ = d_b4_ = d_b5_ = nullptr;
+
+    freep(d_gw1_);
     freep(d_gw1_);
     freep(d_gw2_);
     freep(d_gw3_);
@@ -167,17 +177,23 @@ void GPUAutoencoder::load_weights(const AutoencoderCPU& cpu) {
                           w4_size_ * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_w5_, cpu.conv5().weights().data(),
                           w5_size_ * sizeof(float), cudaMemcpyHostToDevice));
+    
+    size_t off1 = 0;
+    size_t off2 = off1 + b1_size_ * sizeof(float);
+    size_t off3 = off2 + b2_size_ * sizeof(float);
+    size_t off4 = off3 + b3_size_ * sizeof(float);
+    size_t off5 = off4 + b4_size_ * sizeof(float);
 
-    CUDA_CHECK(cudaMemcpy(d_b1_, cpu.conv1().bias().data(),
-                          b1_size_ * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b2_, cpu.conv2().bias().data(),
-                          b2_size_ * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b3_, cpu.conv3().bias().data(),
-                          b3_size_ * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b4_, cpu.conv4().bias().data(),
-                          b4_size_ * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b5_, cpu.conv5().bias().data(),
-                          b5_size_ * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyToSymbol(c_biases_storage, cpu.conv1().bias().data(),
+                                  b1_size_ * sizeof(float), off1));
+    CUDA_CHECK(cudaMemcpyToSymbol(c_biases_storage, cpu.conv2().bias().data(),
+                                  b2_size_ * sizeof(float), off2));
+    CUDA_CHECK(cudaMemcpyToSymbol(c_biases_storage, cpu.conv3().bias().data(),
+                                  b3_size_ * sizeof(float), off3));
+    CUDA_CHECK(cudaMemcpyToSymbol(c_biases_storage, cpu.conv4().bias().data(),
+                                  b4_size_ * sizeof(float), off4));
+    CUDA_CHECK(cudaMemcpyToSymbol(c_biases_storage, cpu.conv5().bias().data(),
+                                  b5_size_ * sizeof(float), off5));
 }
 
 void GPUAutoencoder::save_weights(AutoencoderCPU& cpu) const {
@@ -645,49 +661,247 @@ void upsample2x2_backward_naive(const float* grad_out, float* grad_in,
 }
 
 // ===================== Conv2D backward =====================
-__global__ void conv2d_backward_kernel(const float* input,
-                                       const float* grad_out,
-                                       const float* weight, float* grad_input,
-                                       float* grad_weight, float* grad_bias,
-                                       std::size_t batch, std::size_t in_c,
-                                       std::size_t out_c, std::size_t height,
-                                       std::size_t width) {
-    const std::size_t w_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const std::size_t h_idx = blockIdx.y * blockDim.y + threadIdx.y;
-    const std::size_t oc = blockIdx.z % out_c;
-    const std::size_t n = blockIdx.z / out_c;
-    if (n >= batch || h_idx >= height || w_idx >= width) return;
+// __global__ void conv2d_backward_kernel(const float* input,
+//                                        const float* grad_out,
+//                                        const float* weight, float* grad_input,
+//                                        float* grad_weight, float* grad_bias,
+//                                        std::size_t batch, std::size_t in_c,
+//                                        std::size_t out_c, std::size_t height,
+//                                        std::size_t width) {
+//     const std::size_t w_idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     const std::size_t h_idx = blockIdx.y * blockDim.y + threadIdx.y;
+//     const std::size_t oc = blockIdx.z % out_c;
+//     const std::size_t n = blockIdx.z / out_c;
+//     if (n >= batch || h_idx >= height || w_idx >= width) return;
 
-    auto idx4 = [&](std::size_t n, std::size_t c, std::size_t h,
-                    std::size_t w, std::size_t C, std::size_t H,
-                    std::size_t W) {
-        return ((n * C + c) * H + h) * W + w;
-    };
-    auto widx = [&](std::size_t oc, std::size_t ic, std::size_t kh,
-                    std::size_t kw, std::size_t in_c) {
-        return ((oc * in_c + ic) * 3 + kh) * 3 + kw;
-    };
+//     auto idx4 = [&](std::size_t n, std::size_t c, std::size_t h,
+//                     std::size_t w, std::size_t C, std::size_t H,
+//                     std::size_t W) {
+//         return ((n * C + c) * H + h) * W + w;
+//     };
+//     auto widx = [&](std::size_t oc, std::size_t ic, std::size_t kh,
+//                     std::size_t kw, std::size_t in_c) {
+//         return ((oc * in_c + ic) * 3 + kh) * 3 + kw;
+//     };
 
-    const float go = grad_out[idx4(n, oc, h_idx, w_idx, out_c, height, width)];
-    // grad_bias
-    atomicAdd(&grad_bias[oc], go);
+//     const float go = grad_out[idx4(n, oc, h_idx, w_idx, out_c, height, width)];
+//     // grad_bias
+//     atomicAdd(&grad_bias[oc], go);
 
-    for (std::size_t ic = 0; ic < in_c; ++ic) {
-        for (std::size_t kh = 0; kh < 3; ++kh) {
-            for (std::size_t kw = 0; kw < 3; ++kw) {
-                int in_h = static_cast<int>(h_idx) + static_cast<int>(kh) - 1;
-                int in_w = static_cast<int>(w_idx) + static_cast<int>(kw) - 1;
-                if (in_h < 0 || in_w < 0 || in_h >= static_cast<int>(height) ||
-                    in_w >= static_cast<int>(width)) {
-                    continue;
-                }
-                std::size_t in_id =
-                    idx4(n, ic, static_cast<std::size_t>(in_h),
-                         static_cast<std::size_t>(in_w), in_c, height, width);
-                std::size_t w_id = widx(oc, ic, kh, kw, in_c);
-                atomicAdd(&grad_weight[w_id], input[in_id] * go);
-                atomicAdd(&grad_input[in_id], weight[w_id] * go);
+//     for (std::size_t ic = 0; ic < in_c; ++ic) {
+//         for (std::size_t kh = 0; kh < 3; ++kh) {
+//             for (std::size_t kw = 0; kw < 3; ++kw) {
+//                 int in_h = static_cast<int>(h_idx) + static_cast<int>(kh) - 1;
+//                 int in_w = static_cast<int>(w_idx) + static_cast<int>(kw) - 1;
+//                 if (in_h < 0 || in_w < 0 || in_h >= static_cast<int>(height) ||
+//                     in_w >= static_cast<int>(width)) {
+//                     continue;
+//                 }
+//                 std::size_t in_id =
+//                     idx4(n, ic, static_cast<std::size_t>(in_h),
+//                          static_cast<std::size_t>(in_w), in_c, height, width);
+//                 std::size_t w_id = widx(oc, ic, kh, kw, in_c);
+//                 atomicAdd(&grad_weight[w_id], input[in_id] * go);
+//                 atomicAdd(&grad_input[in_id], weight[w_id] * go);
+//             }
+//         }
+//     }
+// }
+
+// ===================== Conv2D backward (OPTIMIZED: Tiling & Split) =====================
+
+// Cấu hình Tiling
+#define TILE_W 16
+#define TILE_H 16
+#define R 1 
+#define SMEM_W (TILE_W + 2 * R)
+#define SMEM_H (TILE_H + 2 * R)
+
+// Kernel 1: Tính Gradient Input (Backward Data) - Dùng Shared Memory Tiling
+// Kernel này loại bỏ hoàn toàn atomicAdd khi tính g_act
+// ===================== Kernel Backward Data "PRO" (Full Halo Loading) =====================
+
+__global__ void conv2d_backward_data_tiled(
+    const float* __restrict__ grad_out, 
+    const float* __restrict__ weight,
+    float* __restrict__ grad_input,
+    int batch, int in_c, int out_c, int height, int width) 
+{
+    // Kích thước Tile Input: 16x16
+    // Kích thước cần Load (kèm viền): 18x18
+    __shared__ float s_grad_out[SMEM_H * SMEM_W]; // Dùng mảng 1D cho dễ map linear
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int tid = ty * blockDim.x + tx; // Linear Thread ID (0 -> 255)
+
+    int n = blockIdx.z / in_c;
+    int ic = blockIdx.z % in_c;
+
+    // Tọa độ gốc của Block trong ảnh Input (Top-Left của Tile 16x16)
+    int block_start_y = blockIdx.y * TILE_H;
+    int block_start_x = blockIdx.x * TILE_W;
+
+    if (n >= batch) return;
+
+    float d_input_val = 0.0f;
+
+    // Loop over Output Channels
+    for (int oc = 0; oc < out_c; ++oc) {
+        
+        // --- BƯỚC 1: COOPERATIVE LOADING (Load cả vùng Halo) ---
+        // Ta cần load 18x18 = 324 phần tử.
+        // Có 256 threads. Thread sẽ load nhiều hơn 1 phần tử.
+        
+        int num_elements_to_load = SMEM_H * SMEM_W; // 324
+        
+        for (int i = tid; i < num_elements_to_load; i += blockDim.x * blockDim.y) {
+            // Map linear index 'i' sang tọa độ trong Shared Mem (18x18)
+            int s_y = i / SMEM_W;
+            int s_x = i % SMEM_W;
+
+            // Map sang tọa độ Global (grad_out). 
+            // Lưu ý: SMEM[1][1] tương ứng với BlockStart[0][0].
+            // Nên SMEM[0][0] tương ứng BlockStart[-1][-1] (padding thật của ảnh)
+            int g_y = block_start_y + s_y - R; // trừ R để lấy viền
+            int g_x = block_start_x + s_x - R;
+
+            float val = 0.0f;
+            if (g_y >= 0 && g_y < height && g_x >= 0 && g_x < width) {
+                val = grad_out[((n * out_c + oc) * height + g_y) * width + g_x];
             }
+            s_grad_out[i] = val;
+        }
+
+        __syncthreads(); // Đợi tất cả load xong
+
+        // --- BƯỚC 2: TÍNH TOÁN (Không cần check if/else nữa) ---
+        // Chỉ tính cho 16x16 pixels bên trong
+        int iy = block_start_y + ty;
+        int ix = block_start_x + tx;
+
+        if (iy < height && ix < width) {
+            for (int kh = 0; kh < 3; ++kh) {
+                for (int kw = 0; kw < 3; ++kw) {
+                    // Logic Convolution Backward
+                    // SMEM đã chứa đủ dữ liệu. Pixel (ty, tx) cần dữ liệu xung quanh.
+                    // Trong SMEM 18x18, pixel (ty, tx) nằm ở vị trí (ty+R, tx+R).
+                    // Khi convolution, ta truy cập lùi: (ty+R - kh + 1, tx+R - kw + 1)
+                    // (Lưu ý công thức index phụ thuộc vào việc bạn coi weight là cross-correlation hay conv)
+                    // Với backward chuẩn:
+                    
+                    int s_idx_y = ty + R - kh + 1;
+                    int s_idx_x = tx + R - kw + 1;
+                    
+                    float go_val = s_grad_out[s_idx_y * SMEM_W + s_idx_x];
+
+                    int w_idx = ((oc * in_c + ic) * 3 + kh) * 3 + kw;
+                    d_input_val += go_val * weight[w_idx];
+                }
+            }
+        }
+        __syncthreads(); // Sync trước khi load channel tiếp theo
+    }
+
+    // Ghi kết quả
+    int iy = block_start_y + ty;
+    int ix = block_start_x + tx;
+    if (iy < height && ix < width) {
+        int idx = ((n * in_c + ic) * height + iy) * width + ix;
+        grad_input[idx] = d_input_val;
+    }
+}
+
+// Kernel 2: Tính Gradient Weight & Bias (Backward Filter) - Dùng Register Accumulation
+// Giảm số lượng atomicAdd từ (H*W) lần xuống 1 lần/thread
+__global__ void conv2d_backward_filter_optimized(
+    const float* __restrict__ input, 
+    const float* __restrict__ grad_out,
+    float* __restrict__ grad_weight,
+    float* __restrict__ grad_bias,
+    int batch, int in_c, int out_c, int height, int width) 
+{
+    // 1. SHARED MEMORY: Lưu gradient của filter 3x3 và bias
+    // Kích thước rất nhỏ: 9 floats cho weights + 1 float cho bias
+    __shared__ float s_dw[3][3];
+    __shared__ float s_db;
+
+    // Khởi tạo Shared Memory về 0 (Chỉ cần Thread 0 làm)
+    int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    if (tid == 0) {
+        for(int i=0; i<3; ++i)
+            for(int j=0; j<3; ++j)
+                s_dw[i][j] = 0.0f;
+        s_db = 0.0f;
+    }
+    __syncthreads(); // Đợi khởi tạo xong
+
+    int oc = blockIdx.z;
+    int ic = blockIdx.y;
+    int tile_idx = blockIdx.x;
+    
+    // 2. REGISTER ACCUMULATION (Cấp 1)
+    // Mỗi thread tự tính phần của mình vào biến cục bộ (nhanh nhất)
+    float r_dw[3][3] = {0}; 
+    float r_db = 0.0f;
+
+    int stride = blockDim.x * blockDim.y; 
+    int total_pixels = batch * height * width;
+    
+    // Grid-stride loop duyệt qua ảnh
+    for (int i = tid + tile_idx * stride; i < total_pixels; i += stride * gridDim.x) {
+        int n = i / (height * width);
+        int rem = i % (height * width);
+        int r = rem / width;
+        int c = rem % width;
+
+        float go = grad_out[((n * out_c + oc) * height + r) * width + c];
+        
+        r_db += go;
+
+        for (int kh = 0; kh < 3; ++kh) {
+            for (int kw = 0; kw < 3; ++kw) {
+                int in_r = r + kh - 1; 
+                int in_c_pos = c + kw - 1;
+                
+                if (in_r >= 0 && in_r < height && in_c_pos >= 0 && in_c_pos < width) {
+                    float val = input[((n * in_c + ic) * height + in_r) * width + in_c_pos];
+                    r_dw[kh][kw] += val * go;
+                }
+            }
+        }
+    }
+
+    // 3. SHARED MEMORY REDUCTION (Cấp 2)
+    // Các threads cộng dồn biến cục bộ vào shared memory
+    // atomicAdd trên Shared Memory rất nhanh (được hỗ trợ phần cứng từ Maxwell trở lên)
+    for (int kh = 0; kh < 3; ++kh) {
+        for (int kw = 0; kw < 3; ++kw) {
+            atomicAdd(&s_dw[kh][kw], r_dw[kh][kw]);
+        }
+    }
+    atomicAdd(&s_db, r_db);
+
+    __syncthreads(); // Đợi tất cả threads cộng xong
+
+    // 4. GLOBAL MEMORY UPDATE (Cấp 3)
+    // Chỉ duy nhất Thread 0 đại diện Block ghi ra Global Memory
+    if (tid == 0) {
+        // Cộng Weight
+        for (int kh = 0; kh < 3; ++kh) {
+            for (int kw = 0; kw < 3; ++kw) {
+                int w_idx = ((oc * in_c + ic) * 3 + kh) * 3 + kw;
+                atomicAdd(&grad_weight[w_idx], s_dw[kh][kw]);
+            }
+        }
+
+        // Cộng Bias
+        // Logic Bias: Bias chỉ phụ thuộc Out Channel (oc).
+        // Nhưng Grid của ta chạy song song theo cả In Channel (ic) và Tile.
+        // Để tránh cộng trùng lặp (ví dụ 128 ic block cùng cộng vào 1 bias -> sai),
+        // ta quy ước: Chỉ block có ic=0 và tile_idx=0 mới được quyền cập nhật bias.
+        if (ic == 0 && tile_idx == 0) {
+            atomicAdd(&grad_bias[oc], s_db);
         }
     }
 }
@@ -698,13 +912,26 @@ void conv2d_backward_naive(const float* input, const float* grad_out,
                            std::size_t batch, std::size_t in_c,
                            std::size_t out_c, std::size_t height,
                            std::size_t width) {
-    // Zero grad_input/grad_weight/grad_bias before calling this.
+    
+    // 1. Launch Kernel tính Gradient Data (grad_input)
     dim3 block(16, 16);
-    dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y,
-              batch * out_c);
-    conv2d_backward_kernel<<<grid, block>>>(input, grad_out, weight,
-                                            grad_input, grad_weight, grad_bias,
-                                            batch, in_c, out_c, height, width);
+    dim3 grid_data((width + block.x - 1) / block.x, 
+                   (height + block.y - 1) / block.y, 
+                   batch * in_c); 
+    
+    conv2d_backward_data_tiled<<<grid_data, block>>>(
+        grad_out, weight, grad_input, batch, in_c, out_c, height, width);
+    CUDA_CHECK(cudaGetLastError());
+
+    // 2. Launch Kernel tính Gradient Weight & Bias (REDUCTION)
+    // Tăng số lượng tiles lên để tận dụng nhiều SMs hơn nếu ảnh lớn
+    // Với CIFAR 32x32, batch 64, tổng pixel lớn -> tăng tile lên 8 hoặc 16
+    int num_tiles = 8; 
+    dim3 grid_filter(num_tiles, in_c, out_c);
+    dim3 block_filter(256); 
+    
+    conv2d_backward_filter_optimized<<<grid_filter, block_filter>>>(
+        input, grad_out, grad_weight, grad_bias, batch, in_c, out_c, height, width);
     CUDA_CHECK(cudaGetLastError());
 }
 
