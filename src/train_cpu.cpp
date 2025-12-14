@@ -141,6 +141,7 @@ int main(int argc, char** argv) {
 #endif
     double peak_memory_mb = get_peak_memory_usage_mb();
     std::ofstream logf("log.txt", std::ios::out | std::ios::app);
+    // std::ofstream logf("log_cpu.txt", std::ios::out);
     if (logf) {
         logf << "==============\n";
         logf << "<<<General>>>\n";
