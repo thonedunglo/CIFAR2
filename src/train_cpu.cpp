@@ -11,6 +11,36 @@
 #include <numeric>
 #include <string>
 
+#if defined(_WIN32) || defined(_WIN64)
+    #include <windows.h>
+    #include <psapi.h>
+    // Link thư viện Psapi cho Windows (Visual Studio)
+    #pragma comment(lib, "psapi.lib") 
+#else
+    #include <sys/resource.h>
+    #include <unistd.h>
+#endif
+
+// Hàm lấy lượng RAM tối đa đã sử dụng (Peak Memory Usage) tính bằng MB
+double get_peak_memory_usage_mb() {
+#if defined(_WIN32) || defined(_WIN64)
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        // PeakWorkingSetSize trả về bytes -> đổi sang MB
+        return static_cast<double>(pmc.PeakWorkingSetSize) / (1024.0 * 1024.0);
+    }
+#else
+    struct rusage r_usage;
+    getrusage(RUSAGE_SELF, &r_usage);
+    // Linux: ru_maxrss trả về Kilobytes. macOS: trả về Bytes.
+    #ifdef __APPLE__
+        return static_cast<double>(r_usage.ru_maxrss) / (1024.0 * 1024.0);
+    #else // Linux
+        return static_cast<double>(r_usage.ru_maxrss) / 1024.0;
+    #endif
+#endif
+    return 0.0;
+}
 int main(int argc, char** argv) {
     std::string data_dir = "cifar-10-batches-bin";
     if (argc > 1) {
@@ -71,8 +101,10 @@ int main(int argc, char** argv) {
             if (cfg.log_interval > 0 && (b + 1) % cfg.log_interval == 0) {
                 auto now = std::chrono::high_resolution_clock::now();
                 std::chrono::duration<double> elapsed_b = now - start;
+                double current_mem = get_peak_memory_usage_mb();
                 std::cout << "  Batch " << (b + 1) << "/" << num_batches
                           << " - loss: " << loss
+                          << " - mem: " << std::setprecision(2) << current_mem << " MB"
                           << " - elapsed: " << elapsed_b.count() << "s\n";
             }
         }
@@ -107,6 +139,7 @@ int main(int argc, char** argv) {
 #else
     localtime_r(&now_c, &tm_now);
 #endif
+    double peak_memory_mb = get_peak_memory_usage_mb();
     std::ofstream logf("log.txt", std::ios::out | std::ios::app);
     if (logf) {
         logf << "==============\n";
@@ -126,7 +159,7 @@ int main(int argc, char** argv) {
         logf << "<<<Result>>>\n";
         logf << "Last_epoch_loss: " << last_avg_loss << "\n";
         logf << "Avg_epoch_time: " << avg_epoch_time << "\n";
-        logf << "Memory_usage: 0 MB\n";
+        logf << "Memory_usage: " << peak_memory_mb << " MB\n";
         logf << "==============\n";
     } else {
         std::cerr << "Warning: failed to write log.txt\n";
