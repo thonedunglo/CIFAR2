@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
 #else
     localtime_r(&now_c, &tm_now);
 #endif
-    std::ofstream logf("log.txt", std::ios::out | std::ios::trunc);
+    std::ofstream logf("log.txt", std::ios::out | std::ios::app);
     if (logf) {
         logf << "==============\n";
         logf << "<<<General>>>\n";
