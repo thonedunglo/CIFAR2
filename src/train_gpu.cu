@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     }
 
     // Manually set GPU device ID if needed.
-    int gpu_id = 0;  // adjust this value to target another GPU
+    int gpu_id = 1;  // adjust this value to target another GPU
     cudaError_t dev_err = cudaSetDevice(gpu_id);
     if (dev_err != cudaSuccess) {
         std::cerr << "Failed to set CUDA device " << gpu_id << ": "
@@ -50,12 +50,9 @@ int main(int argc, char** argv) {
 
     TrainConfig cfg;
     // GPU default: batch_size 64
-    cfg.batch_size = 64;
     AutoencoderCPU cpu_model;
     GPUAutoencoder gpu(cfg.batch_size);
     gpu.load_weights(cpu_model);
-
-    MSELoss mse;
 
     const std::size_t train_limit =
         (cfg.sample > 0) ? std::min(cfg.sample, ds.train_size()) : ds.train_size();

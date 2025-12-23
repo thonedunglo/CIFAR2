@@ -42,3 +42,69 @@ Forward: 17.4647 ms
 Backward: 315.664 ms
 Loss_ms: 0.906906 ms
 ==============
+==============
+<<<General>>>
+Time: 2025-12-14 23:00:49
+Device: GPU
+Optimization: None
+<<<Input>>>
+Sample: 50000
+Test_sample: 10000
+Batch_size: 64
+Epochs: 1
+Log_interval: 1
+Lr: 0.002
+Load_checkpoint: 0
+<<<Result>>>
+Last_epoch_loss: 0.031646
+Avg_epoch_time: 67.4526
+Memory_usage: 699.5 MB
+H2D_copy: 0.282839 ms
+Forward: 11.1463 ms
+Backward: 73.7174 ms
+Loss_ms: 11.431 ms
+==============
+==============
+<<<General>>>
+Time: 2025-12-15 00:02:49
+Device: GPU
+Optimization: None
+<<<Input>>>
+Sample: 50000
+Test_sample: 10000
+Batch_size: 512
+Epochs: 1
+Log_interval: 1
+Lr: 0.001
+Load_checkpoint: 0
+<<<Result>>>
+Last_epoch_loss: 0.285596
+Avg_epoch_time: 33.5799
+Memory_usage: 3367.5 MB
+H2D_copy: 1.46057 ms
+Forward: 91.2204 ms
+Backward: 241.286 ms
+Loss_ms: 93.0359 ms
+==============
+==============
+<<<General>>>
+Time: 2025-12-15 00:26:56
+Device: GPU
+Optimization: None
+<<<Input>>>
+Sample: 50000
+Test_sample: 10000
+Batch_size: 64
+Epochs: 1
+Log_interval: 1
+Lr: 0.001
+Load_checkpoint: 0
+<<<Result>>>
+Last_epoch_loss: 0.0440619
+Avg_epoch_time: 33.3112
+Memory_usage: 699.5 MB
+H2D_copy: 0.280328 ms
+Forward: 11.2279 ms
+Backward: 28.8906 ms
+Loss_ms: 11.5187 ms
+==============
