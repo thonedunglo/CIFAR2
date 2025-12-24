@@ -1,7 +1,7 @@
 #include "autoencoder.h"
 #include "dataset.h"
 #include "layers.h"
-#include "train_config.h"
+#include "train_config_cpu.h"
 
 #include <chrono>
 #include <ctime>
