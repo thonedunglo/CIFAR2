@@ -724,7 +724,7 @@ float GPUAutoencoder::compute_mse_loss(std::size_t batch_size) {
     return h_loss;
 }
 
-void GPUAutoencoder::compute_mse_grad(std::size_t batch_size) {
+void GPUAutoencoder::compute_mse_gradient(std::size_t batch_size) {
     std::size_t total_elems = batch_size * 3 * 32 * 32;
 
     // Calculate gradients for the output layer on the device
