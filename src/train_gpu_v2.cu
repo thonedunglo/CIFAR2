@@ -268,7 +268,7 @@ int main(int argc, char** argv) {
         logf << "<<<General>>>\n";
         logf << "Time: " << std::put_time(&tm_now, "%Y-%m-%d %H:%M:%S") << "\n";
         logf << "Device: GPU\n";
-        logf << "Optimization: Version 2\n";
+        logf << "Optimization:  Atomic Contention and Algorithmic Optimization\n";
         logf << "<<<Input>>>\n";
         logf << "Sample: " << train_limit << "\n";
         logf << "Test_sample: "
