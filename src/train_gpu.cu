@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     }
 
     // Manually set GPU device ID if needed.
-    int gpu_id = 1;  // adjust this value to target another GPU
+    int gpu_id = 0;  // adjust this value to target another GPU
     cudaError_t dev_err = cudaSetDevice(gpu_id);
     if (dev_err != cudaSuccess) {
         std::cerr << "Failed to set CUDA device " << gpu_id << ": "
