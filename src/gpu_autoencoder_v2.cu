@@ -821,11 +821,12 @@ __global__ void conv2d_backward_filter_optimized(
     float* __restrict__ grad_bias,
     int batch, int in_c, int out_c, int height, int width) 
 {
-    // 1. SHARED MEMORY
+    // 1. SHARED MEMORY: Lưu gradient của filter 3x3 và bias
+    // Kích thước rất nhỏ: 9 floats cho weights + 1 float cho bias
     __shared__ float s_dw[3][3];
     __shared__ float s_db;
 
-    // Khởi tạo (Chỉ thread 0 làm)
+    // Khởi tạo Shared Memory về 0 (Chỉ cần Thread 0 làm)
     int tid = threadIdx.x + threadIdx.y * blockDim.x;
     if (tid == 0) {
         for(int i=0; i<3; ++i)
@@ -833,19 +834,21 @@ __global__ void conv2d_backward_filter_optimized(
                 s_dw[i][j] = 0.0f;
         s_db = 0.0f;
     }
-    __syncthreads();
+    __syncthreads(); // Đợi khởi tạo xong
 
     int oc = blockIdx.z;
     int ic = blockIdx.y;
     int tile_idx = blockIdx.x;
     
-    // 2. REGISTER ACCUMULATION (Tính toán cục bộ)
+    // 2. REGISTER ACCUMULATION (Cấp 1)
+    // Mỗi thread tự tính phần của mình vào biến cục bộ (nhanh nhất)
     float r_dw[3][3] = {0}; 
     float r_db = 0.0f;
 
     int stride = blockDim.x * blockDim.y; 
     int total_pixels = batch * height * width;
     
+    // Grid-stride loop duyệt qua ảnh
     for (int i = tid + tile_idx * stride; i < total_pixels; i += stride * gridDim.x) {
         int n = i / (height * width);
         int rem = i % (height * width);
@@ -853,12 +856,14 @@ __global__ void conv2d_backward_filter_optimized(
         int c = rem % width;
 
         float go = grad_out[((n * out_c + oc) * height + r) * width + c];
+        
         r_db += go;
 
         for (int kh = 0; kh < 3; ++kh) {
             for (int kw = 0; kw < 3; ++kw) {
                 int in_r = r + kh - 1; 
                 int in_c_pos = c + kw - 1;
+                
                 if (in_r >= 0 && in_r < height && in_c_pos >= 0 && in_c_pos < width) {
                     float val = input[((n * in_c + ic) * height + in_r) * width + in_c_pos];
                     r_dw[kh][kw] += val * go;
@@ -867,52 +872,35 @@ __global__ void conv2d_backward_filter_optimized(
         }
     }
 
-    // --- [NEW] BƯỚC 3: WARP-LEVEL REDUCTION (Dùng Shuffle) ---
-    // Cộng dồn dữ liệu trong cùng 1 Warp (32 threads) mà không dùng Shared Mem
-    unsigned int mask = 0xffffffff;
-    
-    // Reduce Bias
-    for (int offset = 16; offset > 0; offset /= 2) {
-        r_db += __shfl_down_sync(mask, r_db, offset);
-    }
-
-    // Reduce Weights (Loop unrolled for performance)
+    // 3. SHARED MEMORY REDUCTION (Cấp 2)
+    // Các threads cộng dồn biến cục bộ vào shared memory
+    // atomicAdd trên Shared Memory rất nhanh (được hỗ trợ phần cứng từ Maxwell trở lên)
     for (int kh = 0; kh < 3; ++kh) {
         for (int kw = 0; kw < 3; ++kw) {
-            float val = r_dw[kh][kw];
-            for (int offset = 16; offset > 0; offset /= 2) {
-                val += __shfl_down_sync(mask, val, offset);
-            }
-            r_dw[kh][kw] = val;
+            atomicAdd(&s_dw[kh][kw], r_dw[kh][kw]);
         }
     }
+    atomicAdd(&s_db, r_db);
 
-    // --- BƯỚC 4: SHARED MEMORY UPDATE (Chỉ Lane 0 của mỗi Warp ghi) ---
-    // Lane ID: ID của thread trong Warp (0-31)
-    int lane_id = tid % 32;
-    
-    if (lane_id == 0) {
-        // Bây giờ chỉ có 8 threads (với block 256) tranh nhau ghi, thay vì 256 threads
-        // T4 chịu được mức này thoải mái.
-        atomicAdd(&s_db, r_db);
-        for (int kh = 0; kh < 3; ++kh) {
-            for (int kw = 0; kw < 3; ++kw) {
-                atomicAdd(&s_dw[kh][kw], r_dw[kh][kw]);
-            }
-        }
-    }
+    __syncthreads(); // Đợi tất cả threads cộng xong
 
-    __syncthreads();
-
-    // 5. GLOBAL MEMORY UPDATE (Vẫn giữ nguyên: Thread 0 của Block ghi ra ngoài)
+    // 4. GLOBAL MEMORY UPDATE (Cấp 3)
+    // Chỉ duy nhất Thread 0 đại diện Block ghi ra Global Memory
     if (tid == 0) {
+        // Cộng Weight
         for (int kh = 0; kh < 3; ++kh) {
             for (int kw = 0; kw < 3; ++kw) {
                 int w_idx = ((oc * in_c + ic) * 3 + kh) * 3 + kw;
                 atomicAdd(&grad_weight[w_idx], s_dw[kh][kw]);
             }
         }
-        if (ic == 0) { // Đã sửa logic Bias: Chỉ cần ic == 0
+
+        // Cộng Bias
+        // Logic Bias: Bias chỉ phụ thuộc Out Channel (oc).
+        // Nhưng Grid của ta chạy song song theo cả In Channel (ic) và Tile.
+        // Để tránh cộng trùng lặp (ví dụ 128 ic block cùng cộng vào 1 bias -> sai),
+        // ta quy ước: Chỉ block có ic=0 và tile_idx=0 mới được quyền cập nhật bias.
+        if (ic == 0 && tile_idx == 0) {
             atomicAdd(&grad_bias[oc], s_db);
         }
     }
